@@ -1,5 +1,6 @@
 # Local learning notes; omit this file from shared project archives as well.
 /RESEARCH_LOG.md
+/paper/
 /qenv/
 __pycache__/
 /.run_cache/

@@ -4,7 +4,31 @@ Local Clifford+T unitary synthesis using parity-controlled paired words,
 an optional 11-mask factorization with output-phase carry, and common-word
 folding. The implementation retains the 15-mask construction as a fallback.
 
-## Measured result
+## Completed public run
+
+The public test run has finished. Its final public case (`[7, 2]`, two
+samples at each size) received **Gold** with the following averaged costs:
+
+| Qubits | Cost | Baseline | Saving |
+| ---: | ---: | ---: | ---: |
+| 2 | 315 | 660 | 52.2% |
+| 3 | 1,425 | 3,168 | 55.0% |
+| 4 | 5,869.5 | 13,728 | 57.2% |
+| 5 | 18,048 | 57,024 | **68.3%** |
+
+The grader reported maximum entrywise error **5.4e-9** and zero auxiliary
+wires. Its final five-qubit sample cleaned from 95,124 to **66,326** gates,
+including GlobalPhase. That public case took **1,543 seconds**; this is not
+the total runtime of both public cases. The exact report and run settings
+are retained in [`results/public_seed7.json`](results/public_seed7.json).
+The first public case's complete final JSON was not captured here, so this
+table specifically documents the final case rather than combining reports.
+
+The score is the grader's **weighted cost**, `N_T + 44*N_rot`, not a measured
+pure T-count improvement against the best published compiler. In particular,
+the five-qubit circuits retain 15 arbitrary RZ rotations.
+
+### Initial single-sample result
 
 One five-qubit sample, run locally with seed `2026`, one sample, and per-word
 epsilon `1e-9`, received **Gold** from the included grader:
@@ -15,8 +39,8 @@ epsilon `1e-9`, received **Gold** from the included grader:
 
 Synthesis took 547 seconds; the reported case finished in 556 seconds.
 Separate smoke samples at two and three qubits saved 50.3% and 54.7%.
-These measurements do **not** establish that every public case passes.
-Full-suite validation remains pending at the time of this snapshot.
+The single-sample and smoke measurements use different target selections
+from the averaged public case above; they should not be combined as one dataset.
 
 ## Setup
 
@@ -124,8 +148,10 @@ as part of packaging this repository.
 
 ## Attribution
 
-The controlled-gate construction builds on Yamazaki and Akibue,
-[Multi-qubit controlled gate with optimal T-count](https://arxiv.org/abs/2603.14202).
+The controlled-gate construction builds on Yamazaki, Akibue, and Sano,
+[Multi-qubit controlled gate synthesis without T-count overhead in the small-error limit](https://arxiv.org/abs/2603.14202v3).
+The original two-author version has the title
+[Multi-qubit controlled gate with optimal T-count](https://arxiv.org/abs/2603.14202v1).
 The reduced phase-gauged numerical factorization here is an experimental
 implementation choice, not a claim of universal 11-mask solvability.
 

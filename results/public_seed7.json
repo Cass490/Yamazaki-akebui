@@ -1,0 +1,39 @@
+{
+  "provenance": "Final grader report supplied by the user after the public test run; not a new agent benchmark.",
+  "validated_code_commit": "d6656b585afc92d0da9960db503624760adf8a6b",
+  "command": "python -u gold_local.py --mux-method phase11 --fold-common --eps 1e-9 --verbose",
+  "public_case_input": [7, 2],
+  "sizes": [2, 3, 4, 5],
+  "per_word_epsilon": 1e-9,
+  "cost_model": "N_T + 44*N_rot; auxiliary wire multiplier 2^N_aux",
+  "grader_report": {
+    "grade": "Gold",
+    "saving_at_5_qubits": "68.3%",
+    "saving_by_size": ["52.2%", "55.0%", "57.2%", "68.3%"],
+    "cost": [315, 1425, 5869.5, 18048],
+    "baseline": [660, 3168, 13728, 57024],
+    "max_error": "5.4e-09",
+    "aux_wires": 0
+  },
+  "case_elapsed_seconds": 1543,
+  "full_run_elapsed_seconds": null,
+  "last_sample_cleanup": {
+    "qubits": 5,
+    "gates_before": 95124,
+    "gates_after": 66326,
+    "global_phase_counted_as_gate": true,
+    "T_after": 17388,
+    "cleanup_seconds": 5.3
+  },
+  "limits": {
+    "max_entrywise_error": 1e-8,
+    "max_gates": 100000,
+    "gold_saving_percent": 60
+  },
+  "notes": [
+    "Costs are averages of two samples per size; the printed maximum error is rounded by the grader.",
+    "The final five-qubit sample's individual gate/T counts are not the two-sample average cost.",
+    "The first public case's complete final JSON is not included in this evidence file.",
+    "The circuits retain arbitrary RZ gates; the score is not a fully discrete Clifford+T T count."
+  ]
+}
