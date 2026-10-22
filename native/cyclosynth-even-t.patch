@@ -1,0 +1,536 @@
+diff --git a/README.md b/README.md
+index 6421c05..5e4aa46 100644
+--- a/README.md
++++ b/README.md
+@@ -56,6 +56,21 @@ synth = cyclosynth.Synthesizer(epsilon=1e-5, sqrt_t=True)
+ r = synth.synthesize_u3(1.0472, 2.7577, 5.3947)
+ ```
+ 
++For constructions requiring even T-count, use the Clifford+T search constraint:
++
++```python
++synth = cyclosynth.Synthesizer(epsilon=1e-8, even_t=True)
++r = synth.synthesize_u3(1.0472, 2.7577, 5.3947)
++if r:
++    assert r.t_count % 2 == 0
++```
++
++The constraint applies during candidate search and to shallow/diagonal fast
++paths. It keeps the same error tolerance and may increase the returned T-count
++or return `None` if no even candidate is found within the search bounds.
++The default is `even_t=False`; `even_t=True` with `sqrt_t=True` raises `ValueError`.
++Rust callers use `Synthesizer::new(epsilon, false).with_even_t(true)`.
++
+ The `Synthesizer` constructor also exposes tuning knobs (`deadline_ms`, `q_cost`, …) for trading a little circuit cost for speed at deep ε; the defaults already minimize cost as far as my testing[...]
+ 
+ Runnable demos are in [`examples/`](examples/).
+diff --git a/cyclosynth.pyi b/cyclosynth.pyi
+index edf71f1..090f473 100644
+--- a/cyclosynth.pyi
++++ b/cyclosynth.pyi
+@@ -102,6 +102,8 @@ class Synthesizer:
+         sqrt_t: bool = False,
+         max_lde: int | None = None,
+         min_lde: int | None = None,
++        native_rz: bool | None = None,
++        even_t: bool = False,
+         # Clifford+√T-only (raise if passed with sqrt_t=False):
+         optimize_cost: bool | None = None,
+         q_cost: float | None = None,
+@@ -112,6 +114,8 @@ class Synthesizer:
+         """``sqrt_t=True`` requires ``epsilon >= 1e-8`` (``ValueError``
+         below); ``sqrt_t=False`` emits a ``UserWarning`` for
+         ``epsilon < 1e-10`` (below the oracle-validated range).
++        ``even_t=True`` restricts Clifford+T output to even T-count;
++        combining it with ``sqrt_t=True`` raises ``ValueError``.
+         """
+         ...
+     def synthesize_u3(
+@@ -178,3 +182,5 @@ class Synthesizer:
+     def min_lde(self) -> int: ...
+     @property
+     def sqrt_t(self) -> bool: ...
++    @property
++    def even_t(self) -> bool: ...
+diff --git a/src/synthesis/clifford_t/mod.rs b/src/synthesis/clifford_t/mod.rs
+index 06d97e6..53866b8 100644
+--- a/src/synthesis/clifford_t/mod.rs
++++ b/src/synthesis/clifford_t/mod.rs
+@@ -136,6 +136,11 @@ fn det_zeta_parity(m: &Mat2) -> Option<u8> {
+     }
+ }
+ 
++/// T and T† both flip determinant parity; Clifford gates do not.
++pub(crate) fn has_even_t_count(gates: &str) -> bool {
++    gates.bytes().filter(|&gate| gate == b'T' || gate == b't').count().is_multiple_of(2)
++}
++
+ /// `U_L† · target` as a float matrix (`U_L` exact `U2T`, `target` float).
+ fn prefix_dag_times_target(u_l: &U2T, target: &Mat2) -> Mat2 {
+     let u_f = u_l.to_float();
+@@ -545,6 +550,8 @@ pub struct SynthesizerT {
+     /// Max lde for direct_search; above it, skip straight to
+     /// prefix_split_search since brute_aligned_search becomes O(2^4ᵗ).
+     pub(crate) direct_limit: u32,
++    /// Search only the even determinant/T-count sector when requested.
++    pub(crate) even_t: bool,
+ }
+ 
+ /// Read-only context for one `prefix_split_search` sweep, threaded into the
+@@ -563,6 +570,7 @@ struct PrefixSweepCtx<'a> {
+     max_nodes: u64,
+     budget_hit: &'a std::sync::atomic::AtomicBool,
+     found_abort: &'a std::sync::atomic::AtomicBool,
++    even_t: bool,
+ }
+ 
+ impl PrefixSweepCtx<'_> {
+@@ -659,13 +667,18 @@ impl PrefixSweepCtx<'_> {
+                 };
+                 let dist = diamond_distance_u2t_float(&u2t, self.target);
+                 if dist < self.eps {
++                    let gates = BlochDecomposer.decompose(&u2t);
++                    // Reject before setting the shared first-hit abort flag.
++                    if self.even_t && !has_even_t_count(&gates) {
++                        continue;
++                    }
+                     self.found_abort
+                         .store(true, std::sync::atomic::Ordering::Relaxed);
+                     crate::synthesis::diag::record_branch_win(
+                         odd, pos, self.n, self.t,
+                     );
+                     return Some(SynthResultT {
+-                        gates: Some(BlochDecomposer.decompose(&u2t)),
++                        gates: Some(gates),
+                         lde: self.t,
+                         distance: dist,
+                     });
+@@ -729,7 +742,13 @@ impl SynthesizerT {
+             (0, 50)
+         };
+         let direct_limit = if epsilon >= 1e-4 { 8 } else { 6 };
+-        Self { epsilon, max_lde, min_lde, direct_limit }
++        Self { epsilon, max_lde, min_lde, direct_limit, even_t: false }
++    }
++
++    /// Require even T-count without changing the requested error tolerance.
++    pub fn with_even_t(mut self, even_t: bool) -> Self {
++        self.even_t = even_t;
++        self
+     }
+ 
+     pub fn with_max_lde(mut self, max_lde: u32) -> Self {
+@@ -964,10 +983,15 @@ impl SynthesizerT {
+         let branches = build_direct_branches(v);
+ 
+         branches.par_iter().find_map_any(|(v_s, tag)| {
++            // The SU(2) shell and Clifford prefixes are even; only these
++            // branches omit an odd T/T† suffix.
++            if self.even_t && !matches!(tag, DirectBranch::Plain | DirectBranch::ClifEven(_)) {
++                return None;
++            }
+             for sol in brute_aligned_search(*v_s, t, eps, 1) {
+                 let (u2t, gates) = direct_branch_gate(tag, &sol, t);
+                 let dist = diamond_distance_u2t_float(&u2t, target);
+-                if dist < eps {
++                if dist < eps && (!self.even_t || has_even_t_count(&gates)) {
+                     return Some(SynthResultT { gates: Some(gates), lde: t, distance: dist });
+                 }
+             }
+@@ -1078,7 +1102,7 @@ impl SynthesizerT {
+         // when t_inner > 0, odd (U_L·U_R·T). Branch wins split ~50/50 with
+         // no t_inner-parity rule, so neither branch order dominates and the
+         // two are swept together.
+-        let plans: Vec<Vec<bool>> = if t_inner == 0 {
++        let plans: Vec<Vec<bool>> = if t_inner == 0 || self.even_t {
+             vec![vec![false]]
+         } else {
+             vec![vec![false, true]]
+@@ -1110,6 +1134,7 @@ impl SynthesizerT {
+                 max_nodes,
+                 budget_hit: &budget_hit,
+                 found_abort: &found_abort,
++                even_t: self.even_t,
+             };
+             result = order
+                 .par_iter()
+diff --git a/src/synthesis/clifford_t/rz/ladder.rs b/src/synthesis/clifford_t/rz/ladder.rs
+index 45ca914..a3a5661 100644
+--- a/src/synthesis/clifford_t/rz/ladder.rs
++++ b/src/synthesis/clifford_t/rz/ladder.rs
+@@ -17,7 +17,8 @@
+ 
+ use crate::rings::types::MpFloat;
+ use crate::synthesis::distance::{diamond_distance_u2t_float, Mat2};
+-use crate::synthesis::clifford_t::rz::gridsynth_gates_native;
++use crate::synthesis::clifford_t::rz::{gridsynth_gates_native, gridsynth_gates_native_with_parity};
++use crate::synthesis::clifford_t::has_even_t_count;
+ use crate::synthesis::near_clifford::eval_gates_t;
+ use crate::synthesis::synthesizer::SynthResult;
+ 
+@@ -47,6 +48,13 @@ pub(crate) fn prec_for_epsilon(eps: f64) -> u32 {
+ /// `target` is the f64 SU(2) acceptance target built from the same angles.
+ /// Returns `None` on any internal failure — callers fall back to the 8D path.
+ pub(crate) fn synthesize_rz(theta: &MpFloat, target: &Mat2, epsilon: f64) -> Option<SynthResult> {
++    synthesize_rz_with_parity(theta, target, epsilon, false)
++}
++
++/// Same error-verified epsilon ladder, optionally restricted to even T-count.
++pub(crate) fn synthesize_rz_with_parity(
++    theta: &MpFloat, target: &Mat2, epsilon: f64, even_t: bool,
++) -> Option<SynthResult> {
+     if !(MIN_EPSILON..1.0).contains(&epsilon) {
+         return None;
+     }
+@@ -59,7 +67,14 @@ pub(crate) fn synthesize_rz(theta: &MpFloat, target: &Mat2, epsilon: f64) -> Opt
+     EPS_LADDER
+         .par_iter()
+         .map(|mult| {
+-            let gates = gridsynth_gates_native(theta, epsilon * mult, prec)?;
++            let gates = if even_t {
++                gridsynth_gates_native_with_parity(theta, epsilon * mult, prec, true)?
++            } else {
++                gridsynth_gates_native(theta, epsilon * mult, prec)?
++            };
++            if even_t && !has_even_t_count(&gates) {
++                return None;
++            }
+             let u = eval_gates_t(&gates)?; // unexpected alphabet → skip rung
+             let dist = diamond_distance_u2t_float(&u, target);
+             if dist < epsilon {
+diff --git a/src/synthesis/clifford_t/rz/mod.rs b/src/synthesis/clifford_t/rz/mod.rs
+index 0a8e447..c94060a 100644
+--- a/src/synthesis/clifford_t/rz/mod.rs
++++ b/src/synthesis/clifford_t/rz/mod.rs
+@@ -188,6 +188,15 @@ enum LevelOutcome {
+ /// Returns the gate string (matrix order, {H,S,T,X,Y,Z}); the caller
+ /// verifies the diamond distance with the crate's own acceptance check.
+ pub(crate) fn gridsynth_gates_native(theta: &MpFloat, epsilon: f64, prec: u32) -> Option<String> {
++    gridsynth_gates_native_with_parity(theta, epsilon, prec, false)
++}
++
++/// The determinant-one (unshifted) grid branch contains only even-T words.
++/// Skip the odd determinant branch during enumeration, rather than discarding
++/// its first result and losing other candidates at the same depth.
++pub(crate) fn gridsynth_gates_native_with_parity(
++    theta: &MpFloat, epsilon: f64, prec: u32, even_t: bool,
++) -> Option<String> {
+     let theta = MpFloat::with_val(prec, theta);
+     let eps = MpFloat::with_val(prec, epsilon);
+     let mut rng = Rng::new(GS_SEED);
+@@ -220,7 +229,9 @@ pub(crate) fn gridsynth_gates_native(theta: &MpFloat, epsilon: f64, prec: u32) -
+             LevelOutcome::Fatal => return None,
+             LevelOutcome::Empty => {}
+         }
+-        if k >= 2 {
++        if even_t {
++            k += 1;
++        } else if k >= 2 {
+             has_phase = !has_phase;
+             if has_phase {
+                 k += 1;
+diff --git a/src/synthesis/clifford_t/tests.rs b/src/synthesis/clifford_t/tests.rs
+index 6a100e6..9215055 100644
+--- a/src/synthesis/clifford_t/tests.rs
++++ b/src/synthesis/clifford_t/tests.rs
+@@ -44,6 +44,62 @@ mod probes;
+         );
+     }
+ 
++    #[test]
++    fn even_t_direct_search_does_not_stop_at_exact_t() {
++        let target = rz(PI / 4.0);
++        let v = unitary_to_uv(&target);
++        let unconstrained = SynthesizerT::new(1e-3)
++            .direct_search(&target, v, 0)
++            .expect("the odd suffix branch must find exact T");
++        assert!(!has_even_t_count(unconstrained.gates.as_deref().expect("gates")));
++        let constrained = SynthesizerT::new(1e-3).with_even_t(true);
++        assert!(constrained.direct_search(&target, v, 0).is_none());
++    }
++
++    #[test]
++    fn even_t_direct_search_preserves_even_exact_word() {
++        let target = gates_to_u2t_verify("HTHT").to_float();
++        let result = SynthesizerT::new(1e-3)
++            .with_min_lde(0)
++            .with_even_t(true)
++            .synthesize(target)
++            .expect("an exact even word should remain reachable");
++        let gates = result.gates.as_deref().expect("gates");
++        assert!(has_even_t_count(gates));
++        assert!(diamond_distance_u2t_float(&gates_to_u2t_verify(gates), &target) < 1e-3);
++    }
++
++    #[test]
++    fn even_t_prefix_search_generic_target() {
++        let eps = 1e-3;
++        let target = u3(0.3, 0.7, 1.2);
++        let result = SynthesizerT::new(eps)
++            .with_even_t(true)
++            .synthesize(target)
++            .expect("even prefix-search candidate");
++        let gates = result.gates.as_deref().expect("gates");
++        assert!(result.lde > 8, "must exercise the prefix search");
++        assert!(has_even_t_count(gates));
++        assert!(diamond_distance_u2t_float(&gates_to_u2t_verify(gates), &target) < eps);
++    }
++
++    #[test]
++    #[ignore = "deep-epsilon constrained search; run with the deep_eps_canary gate"]
++    fn deep_eps_canary_even_t_u3() {
++        let eps = 1e-10;
++        let (target, col) = angle_target(
++            Angle::Rad(0.3), Angle::Rad(0.7), Angle::Rad(1.2), DEFAULT_COL_PREC,
++        );
++        let result = SynthesizerT::new(eps)
++            .with_max_lde(105)
++            .with_even_t(true)
++            .synthesize_with_exact_col(target, &col)
++            .expect("even-T deep-epsilon candidate within the normal search band");
++        let gates = result.gates.as_deref().expect("gates");
++        assert!(has_even_t_count(gates));
++        assert!(diamond_distance_u2t_float(&gates_to_u2t_verify(gates), &target) < eps);
++    }
++
+     /// Re-build a U2T from the synthesized gate string by parsing left-to-right.
+     fn gates_to_u2t_verify(gate_str: &str) -> U2T {
+         use crate::matrix::U2T;
+diff --git a/src/synthesis/synthesizer.rs b/src/synthesis/synthesizer.rs
+index 8ef53b7..4da8a83 100644
+--- a/src/synthesis/synthesizer.rs
++++ b/src/synthesis/synthesizer.rs
+@@ -20,7 +20,7 @@ use crate::synthesis::angle::Angle;
+ use crate::synthesis::clifford_sqrt_t::rz::synthesize_rz_q;
+ use crate::synthesis::clifford_t::rz::synthesize_rz as synthesize_rz_native;
+ use crate::synthesis::distance::Mat2;
+-use crate::synthesis::clifford_t::SynthesizerT;
++use crate::synthesis::clifford_t::{has_even_t_count, SynthesizerT};
+ use crate::synthesis::clifford_sqrt_t::SynthesizerQ;
+ 
+ /// Result of a successful synthesis call. Same shape regardless of the
+@@ -130,6 +130,24 @@ impl Synthesizer {
+         self
+     }
+ 
++    /// Restrict Clifford+T results to even T-count. Panics if enabled for √T.
++    pub fn with_even_t(mut self, on: bool) -> Self {
++        match &mut self.inner {
++            Backend::T(s) => s.even_t = on,
++            Backend::Q(_) => assert!(!on, "even_t requires Clifford+T (sqrt_t=false)"),
++        }
++        self
++    }
++
++    /// Whether the Clifford+T search is restricted to even T-count.
++    pub fn even_t(&self) -> bool {
++        matches!(&self.inner, Backend::T(s) if s.even_t)
++    }
++
++    fn accepts_t_parity(&self, result: &SynthResult) -> bool {
++        !self.even_t() || result.gates.as_deref().is_some_and(has_even_t_count)
++    }
++
+     /// Override the maximum lde the search will probe.
+     pub fn with_max_lde(mut self, max_lde: u32) -> Self {
+         match &mut self.inner {
+@@ -227,15 +245,26 @@ impl Synthesizer {
+                 + gamma.to_radians_mpfr(DEFAULT_COL_PREC);
+             // Diagonal gate powers (Clifford-looking angles and exact
+             // T/√T powers) answer directly at lde 0.
+-            if let Some(r) = snap_rz_to_diag_power(&theta, self.epsilon(), self.sqrt_t()) {
++            if let Some(r) = snap_rz_to_diag_power(&theta, self.epsilon(), self.sqrt_t())
++                .filter(|r| self.accepts_t_parity(r))
++            {
+                 return Some(r);
+             }
+             let r = match &self.inner {
+-                Backend::T(s) => synthesize_rz_native(&theta, &target, s.epsilon),
++                Backend::T(s) => {
++                    if s.even_t {
++                        crate::synthesis::clifford_t::rz::ladder::synthesize_rz_with_parity(
++                            &theta, &target, s.epsilon, true,
++                        )
++                    } else {
++                        synthesize_rz_native(&theta, &target, s.epsilon)
++                    }
++                }
+                 Backend::Q(s) => {
+                     synthesize_rz_q(&theta, &target, s.epsilon(), s.q_cost_x2)
+                 }
+             };
++            let r = r.filter(|r| self.accepts_t_parity(r));
+             if r.is_some() {
+                 return r;
+             }
+@@ -316,6 +345,7 @@ impl Synthesizer {
+         // knobs; only ε changes.
+         let sub = Synthesizer::new(eps_each, self.sqrt_t())
+             .with_native_rz(self.native_rz)
++            .with_even_t(self.even_t())
+             .with_q_cost(self.q_weight());
+         let ra = sub.synthesize_rz(alpha)?;
+         let rb = sub.synthesize_ry(beta)?;
+@@ -396,7 +426,7 @@ impl Synthesizer {
+                 nc::eval_gates_t(&point.gates).map(|u| (u.k, diamond_distance_u2t_float(&u, target)))
+             };
+             if let Some((lde, dist)) = hit {
+-                if dist < eps {
++                if dist < eps && (!self.even_t() || has_even_t_count(&point.gates)) {
+                     return Some(SynthResult {
+                         gates: Some(point.gates.clone()),
+                         lde,
+@@ -410,6 +440,11 @@ impl Synthesizer {
+             return None;
+         }
+         let esc = nc::build_escape(target, exact_col, delta / eps)?;
++        // The current escape words have 12 or 20 T gates. Preserve the
++        // constraint explicitly if that construction is changed later.
++        if self.even_t() && !has_even_t_count(&esc.w_gates) {
++            return None;
++        }
+         let inner = self.synthesize_su2_col_direct(esc.target, &esc.col)?;
+         let inner_gates = inner.gates?;
+         let gates = format!("{inner_gates}{}", esc.w_gates);
+@@ -422,7 +457,7 @@ impl Synthesizer {
+             let u = nc::eval_gates_t(&gates)?;
+             (u.k, diamond_distance_u2t_float(&u, target))
+         };
+-        if dist < eps {
++        if dist < eps && (!self.even_t() || has_even_t_count(&gates)) {
+             Some(SynthResult { gates: Some(gates), lde, distance: dist })
+         } else {
+             None
+@@ -612,6 +647,8 @@ impl PySynthesizer {
+     /// Jointly-optimized general targets: `sqrt_t=True` (u2/u3) raises
+     /// `ValueError` below 1e-8; `sqrt_t=False` warns below 1e-10.
+     ///
++    /// `even_t=True` requires even T-count (Clifford+T only). The search
++    /// omits odd determinant branches and odd shallow/diagonal shortcuts.
+     /// `native_rz` (default on) routes z-rotation targets through the
+     /// native Ross–Selinger path — milliseconds at any supported ε,
+     /// including near-Clifford angles; pass `False` to force the lattice
+@@ -619,7 +656,7 @@ impl PySynthesizer {
+     #[new]
+     #[pyo3(signature = (epsilon, *, sqrt_t=false, max_lde=None, min_lde=None,
+                         optimize_cost=None, q_cost=None, lde_window=None,
+-                        deadline_ms=None, seq_parity=None, native_rz=None))]
++                        deadline_ms=None, seq_parity=None, native_rz=None, even_t=false))]
+     #[allow(clippy::too_many_arguments)]
+     fn new(
+         py: Python<'_>,
+@@ -633,12 +670,18 @@ impl PySynthesizer {
+         deadline_ms: Option<u64>,
+         seq_parity: Option<bool>,
+         native_rz: Option<bool>,
++        even_t: bool,
+     ) -> PyResult<Self> {
+         // Only the hard floor here: whether the narrower general-target
+         // ranges apply depends on what gets synthesized, so those are
+         // checked per call.
+         let _ = py;
+         check_epsilon_floor(epsilon)?;
++        if even_t && sqrt_t {
++            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
++                "even_t requires Clifford+T; pass sqrt_t=False",
++            ));
++        }
+         // The cost-optimizer kwargs only affect the √T backend; silently
+         // ignoring them for Clifford+T is a footgun, so reject up front.
+         if !sqrt_t
+@@ -651,6 +694,7 @@ impl PySynthesizer {
+             ));
+         }
+         let mut s = Synthesizer::new(epsilon, sqrt_t);
++        s = s.with_even_t(even_t);
+         if let Some(v) = max_lde {
+             s = s.with_max_lde(v);
+         }
+@@ -808,11 +852,17 @@ impl PySynthesizer {
+         self.inner.sqrt_t()
+     }
+ 
++    #[getter]
++    fn even_t(&self) -> bool {
++        self.inner.even_t()
++    }
++
+     fn __repr__(&self) -> String {
+         format!(
+-            "Synthesizer(epsilon={:.3e}, sqrt_t={}, min_lde={}, max_lde={})",
++            "Synthesizer(epsilon={:.3e}, sqrt_t={}, even_t={}, min_lde={}, max_lde={})",
+             self.inner.epsilon(),
+             self.inner.sqrt_t(),
++            self.inner.even_t(),
+             self.inner.min_lde(),
+             self.inner.max_lde(),
+         )
+@@ -1103,6 +1153,68 @@ mod tests {
+         ]
+     }
+ 
++    #[test]
++    fn even_t_native_rotations_reject_odd_snap_and_keep_cliffords() {
++        let eps = 1e-3;
++        let default = Synthesizer::new(eps, false);
++        assert!(!default.even_t());
++        let odd = default.synthesize_rz(Angle::PiRatio(1, 4)).expect("exact T");
++        assert!(!has_even_t_count(odd.gates.as_deref().expect("gates")));
++
++        let synth = Synthesizer::new(eps, false).with_even_t(true);
++        assert!(synth.even_t());
++        for (result, target) in [
++            (synth.synthesize_rz(Angle::PiRatio(1, 4)), rz_target(std::f64::consts::FRAC_PI_4)),
++            (synth.synthesize_rx(Angle::PiRatio(1, 4)), rx_target(std::f64::consts::FRAC_PI_4)),
++            (synth.synthesize_ry(Angle::PiRatio(1, 4)), ry_target(std::f64::consts::FRAC_PI_4)),
++        ] {
++            let result = result.expect("even native rotation");
++            let gates = result.gates.as_deref().expect("gates");
++            assert!(has_even_t_count(gates));
++            assert!(diamond_distance_u2t_float(&eval_gates_t(gates).expect("eval"), &target) < eps);
++        }
++        let s = synth.synthesize_rz(Angle::PiRatio(1, 2)).expect("S shortcut");
++        assert_eq!(s.gates.as_deref(), Some("S"));
++    }
++
++    #[test]
++    fn even_t_joint_and_rotation_routes_preserve_constraint() {
++        let eps = 1e-3;
++        let synth = Synthesizer::new(eps, false).with_even_t(true);
++        let (target, _) = crate::synthesis::angle::angle_target(
++            Angle::Rad(0.3), Angle::Rad(0.7), Angle::Rad(1.2),
++            crate::synthesis::angle::DEFAULT_COL_PREC,
++        );
++        for result in [
++            synth.synthesize_u3(Angle::Rad(0.7), Angle::Rad(0.3), Angle::Rad(1.2)),
++            synth.synthesize_zyz(Angle::Rad(0.3), Angle::Rad(0.7), Angle::Rad(1.2)),
++        ] {
++            let result = result.expect("even composite");
++            let gates = result.gates.as_deref().expect("gates");
++            assert!(has_even_t_count(gates));
++            assert!(diamond_distance_u2t_float(&eval_gates_t(gates).expect("eval"), &target) < eps);
++        }
++    }
++
++    #[test]
++    fn even_t_joint_shallow_target_does_not_return_odd_word() {
++        let eps = 1e-3;
++        let result = Synthesizer::new(eps, false)
++            .with_even_t(true)
++            .synthesize_u3(Angle::PiRatio(1, 4), Angle::PiRatio(-1, 2), Angle::PiRatio(1, 2))
++            .expect("even approximation to the shallow Rx(pi/4) target");
++        let gates = result.gates.as_deref().expect("gates");
++        assert!(has_even_t_count(gates));
++        let target = rx_target(std::f64::consts::FRAC_PI_4);
++        assert!(diamond_distance_u2t_float(&eval_gates_t(gates).expect("eval"), &target) < eps);
++    }
++
++    #[test]
++    #[should_panic(expected = "even_t requires Clifford+T")]
++    fn even_t_rejects_sqrt_t_backend() {
++        let _ = Synthesizer::new(1e-3, true).with_even_t(true);
++    }
++
+     /// The Clifford-wrap algebra behind rx/ry (X = H·Z·H, Y = S·X·S†):
+     /// re-verify each circuit against a numerically built Rx/Ry/Rz target
+     /// on BOTH gate sets.

@@ -1,0 +1,8 @@
+# Versions in the environment that produced the reported local Gold sample.
+# cyclosynth is built separately with scripts/setup_cyclosynth.sh.
+numpy==2.2.6
+pennylane==0.42.3
+pennylane-lightning==0.42.0
+pygridsynth==2.0.0
+mpmath==1.4.1
+maturin==1.15.0
