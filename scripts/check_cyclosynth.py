@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""Read-only compatibility check for native even-T synthesis.
+"""Check the source and installed native even-T API without synthesis.
 
-The old textual/environment-variable patch is replaced by Synthesizer(even_t=True).
-This command never patches Rust, builds, installs, or performs synthesis.
-Usage: python patch_parity.py [path/to/cyclosynth]
+Usage: python scripts/check_cyclosynth.py [path/to/cyclosynth]
 """
 import argparse
 from pathlib import Path
@@ -13,8 +11,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "repo", nargs="?", type=Path,
-        default=Path(__file__).resolve().parent / "cyclosynth",
-        help="cyclosynth checkout (default: cyclosynth beside this script)",
+        default=Path(__file__).resolve().parents[1] / "cyclosynth",
+        help="cyclosynth checkout (default: cyclosynth in the project root)",
     )
     args = parser.parse_args(argv)
     repo = args.repo.expanduser().resolve()

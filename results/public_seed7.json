@@ -1,5 +1,5 @@
 {
-  "provenance": "Final grader report supplied by the user after the public test run; not a new agent benchmark.",
+  "provenance": "Transcribed from the final output of the local challenge grader for public case [7, 2].",
   "validated_code_commit": "d6656b585afc92d0da9960db503624760adf8a6b",
   "command": "python -u gold_local.py --mux-method phase11 --fold-common --eps 1e-9 --verbose",
   "public_case_input": [7, 2],

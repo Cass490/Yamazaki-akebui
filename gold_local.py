@@ -1,38 +1,27 @@
 #!/usr/bin/env python3
 """
-Unitary-synthesis challenge (QHack 2026 Q8) -- Gold attempt, LOCAL RUN.
+Local unitary-synthesis compiler for QHack 2026 Question 8.
 
-Method
-  1. Flag / recursive cosine-sine decomposition -> 2^n - 1 uniformly controlled single-qubit gates (minimal count).
-  2. Each multiplexor: parity factorisation  V_x = R . prod_j beta_j^{p_j(x)}  (solved numerically),
-     then Yamazaki & Akibue (arXiv 2603.14202, Thm 4 / Lemma 19): every beta_j becomes a *paired word*
-     costing ~ T(W)/2 + ~3, plus one common word per multiplexor.
-  3. Single-qubit words: optimal-T Clifford+T synthesis of general SU(2) (Morisaki-Sano-Akibue,
-     arXiv 2510.05816) via cyclosynth (Rust).  All leftover diagonal phases are absorbed by the next
-     multiplexor for free; the final diagonal uses 2^(n-1)-1 rotations.
+Run the recorded configuration:
+  python -u gold_local.py --mux-method phase11 --fold-common --eps 1e-9 --verbose
 
-Setup (once):
-  pip install numpy pennylane pygridsynth mpmath maturin
-  git clone https://github.com/mtweiden/cyclosynth && cd cyclosynth
-  #   Debian/Ubuntu: sudo apt-get install libgmp-dev libmpfr-dev m4      macOS: brew install gmp mpfr
-  maturin develop --release && cd ..
+Recursive cosine-sine decomposition supplies uniformly controlled one-qubit
+gates. Parity-controlled paired words share Clifford+T implementations; an
+optional 11-mask factorization carries output Z phases into subsequent blocks.
+The original 15-mask factorization is retained as a numerical fallback and
+for the final multiplexor. Common-word folding jointly compiles the final pair.
+The final diagonal retains 2^(n-1)-1 arbitrary RZ rotations.
 
-Run:
-  python gold_local.py --template challenge.py              # the challenge file with the grader (any version)
-  python smoke_test.py --mux-method phase11 --fold-common --eps 1e-9
-  python gold_local.py --mux-method phase11 --fold-common --eps 1e-9 --sizes 5 --seed 2026 --samples 1 --verbose
-  python gold_local.py --template challenge.py --error-budget 8e-9  # conservative accuracy allocation; costs more
-  python gold_local.py --template challenge.py --synth pygridsynth --sizes 2 3   # quick correctness check, no Rust
+Joint single-qubit synthesis uses cyclosynth with this project's native even-T
+patch. Follow README.md and scripts/setup_cyclosynth.sh for installation.
+The construction builds on Yamazaki, Akibue, and Sano (arXiv:2603.14202) and
+Morisaki, Sano, and Akibue (arXiv:2510.05816).
 
-Notes
-  * This uses external packages, so it is for measuring locally -- it is not a platform submission.
-  * --eps is a PER-WORD tolerance, not a circuit tolerance. A five-qubit sample at 4e-9 failed accuracy.
-  * --error-budget allocates a conservative sum-of-errors budget across words; final grading is still required.
-    This can increase T cost and does not establish Gold's 60% saving.
-  * Runtime is dominated by cyclosynth (~1-3 s per word, ~500 words per 5-qubit sample).
-  * --mux-method phase11 plans 376 source words at n=5, with a safe 496-word fallback maximum.
-    --fold-common pairs two full words in place of the final split and common word.
-    These options require measurement; no Gold score is guaranteed.
+--eps is a per-word tolerance; final acceptance uses the grader's full matrix
+comparison. --error-budget selects a conservative allocation that may increase
+cost. At five qubits phase11 plans 376 source words, or up to 496 with fallbacks.
+This is a standalone local compiler with a compiled dependency, rather than
+a Python-only platform submission. See README.md for results and limitations.
 """
 import argparse, functools, itertools as _it, sys, time
 from pathlib import Path
@@ -699,7 +688,7 @@ def simulate(gates, n):
 # ======================================================================
 # flagsynth.py
 # ======================================================================
-"""Gold attempt: flag (recursive CSD) circuit, every multiplexor built from Yamazaki-Akibue paired words."""
+"""Recursive CSD circuit with parity-controlled paired-word multiplexors."""
 import numpy as np
 
 def csd_items(u_mat, cs_decomposition):

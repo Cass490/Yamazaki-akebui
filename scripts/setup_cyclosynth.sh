@@ -47,4 +47,4 @@ echo "Building cyclosynth into $task_venv (this can take several minutes)."
     # A venv created from Conda can inherit both variables; maturin needs one.
     env -u CONDA_PREFIX VIRTUAL_ENV="$task_venv" "$task_python" -m maturin develop --release
 )
-"$task_python" "$task_root/patch_parity.py" "$task_source"
+"$task_python" "$task_root/scripts/check_cyclosynth.py" "$task_source"

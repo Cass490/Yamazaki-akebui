@@ -1,53 +1,60 @@
-# Yamazaki-akebui
+# QHack 2026 Q8: Unitary Synthesis
 
-Local Clifford+T unitary synthesis using parity-controlled paired words,
-an optional 11-mask factorization with output-phase carry, and common-word
-folding. The implementation retains the 15-mask construction as a fallback.
+A local compiler for the unitary-synthesis challenge, using parity-controlled
+Clifford+T paired words, output-phase carry, and common-word folding.
+The entry point is [`gold_local.py`](gold_local.py).
 
-## Completed public run
+## Recorded result
 
-The public test run has finished. Its final public case (`[7, 2]`, two
-samples at each size) received **Gold** with the following averaged costs:
+The included challenge grader returned **Gold** for public case `[7, 2]`
+(two targets at each size):
 
-| Qubits | Cost | Baseline | Saving |
+| Qubits | Mean cost | Baseline | Saving |
 | ---: | ---: | ---: | ---: |
 | 2 | 315 | 660 | 52.2% |
 | 3 | 1,425 | 3,168 | 55.0% |
 | 4 | 5,869.5 | 13,728 | 57.2% |
 | 5 | 18,048 | 57,024 | **68.3%** |
 
-The grader reported maximum entrywise error **5.4e-9** and zero auxiliary
-wires. Its final five-qubit sample cleaned from 95,124 to **66,326** gates,
-including GlobalPhase. That public case took **1,543 seconds**; this is not
-the total runtime of both public cases. The exact report and run settings
-are retained in [`results/public_seed7.json`](results/public_seed7.json).
-The first public case's complete final JSON was not captured here, so this
-table specifically documents the final case rather than combining reports.
+The maximum entrywise error across that case was reported as **5.4e-9**, with
+zero auxiliary wires. The final five-qubit sample contained **66,326 gates**
+after cleanup, including GlobalPhase. The case took **1,543 seconds
+(25 minutes 43 seconds)**; this is not the duration of both public cases.
 
-The score is the grader's **weighted cost**, `N_T + 44*N_rot`, not a measured
-pure T-count improvement against the best published compiler. In particular,
-the five-qubit circuits retain 15 arbitrary RZ rotations.
+The transcribed grader output, command, and measurement scope are in
+[`results/public_seed7.json`](results/public_seed7.json). The complete first
+case report and raw terminal logs are not included.
 
-### Initial single-sample result
+The score is `N_T + 44*N_rot`, as defined by the challenge. Five-qubit circuits
+retain **15 arbitrary RZ rotations**; this result is a weighted-cost saving,
+not a pure Clifford+T T-count comparison. Final accuracy includes global phase.
 
-One five-qubit sample, run locally with seed `2026`, one sample, and per-word
-epsilon `1e-9`, received **Gold** from the included grader:
+## Method
 
-| Cost | Baseline | Saving | Maximum entrywise error | Emitted gates | Auxiliary wires |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 18,057 | 57,024 | 68.3% | 5.8e-9 | 66,121 | 0 |
+1. Recursive cosine-sine decomposition produces a network of uniformly
+   controlled one-qubit gates.
+2. Joint SU(2) synthesis supplies Clifford+T words using
+   [cyclosynth](https://github.com/mtweiden/cyclosynth), patched to constrain
+   paired words to even T count.
+3. Paired-word compilation shares aligned gate layers. Common-word folding
+   incorporates the final common gate into a directly compiled branch pair.
+4. At five qubits, eligible multiplexors use an ordered 11-mask numerical
+   factorization with output Z phases carried into subsequent blocks.
+   Numerical failures use the original 15-mask factorization. The final
+   multiplexor also retains 15 masks to avoid additional arbitrary rotations.
+5. Exact Clifford rewrites and phase-aware cancellation reduce physical gate
+   count before the grader simulates the full circuit.
 
-Synthesis took 547 seconds; the reported case finished in 556 seconds.
-Separate smoke samples at two and three qubits saved 50.3% and 54.7%.
-The single-sample and smoke measurements use different target selections
-from the averaged public case above; they should not be combined as one dataset.
+The compiler synthesizes the supplied matrix rather than selecting a stored
+public-target circuit. Optional checkpoints reuse completed synthesis work.
+The reduced factorization is not proved to cover every target, and the
+recorded score is not a guarantee for unseen seeds.
 
 ## Setup
 
-The measured environment used Python **3.10.19**. Use Python 3.10 for the
-pinned dependencies. Building the native dependency also requires Git, Rust
-with rustup (the upstream toolchain is pinned), a C build toolchain, `make`,
-`m4`, and GMP/MPFR development dependencies.
+The recorded environment used **Python 3.10.19**. Use Python 3.10 with the
+pinned dependencies. Native compilation requires Git, Rust/rustup, a C build
+toolchain, `make`, `m4`, and GMP/MPFR development packages.
 
 ```bash
 git clone https://github.com/Cass490/Yamazaki-akebui.git
@@ -58,83 +65,55 @@ python -m pip install -r requirements.txt
 bash scripts/setup_cyclosynth.sh
 ```
 
-The setup script clones [cyclosynth](https://github.com/mtweiden/cyclosynth)
-at the revision in `native/cyclosynth-base.txt`, applies
-`native/cyclosynth-even-t.patch`, and builds it into the active venv. The
-patch exposes the native `Synthesizer(even_t=True)` constraint used by paired
-words. Installing an unpatched upstream build is insufficient for this code.
-If Rust is installed but unavailable in the shell, source `~/.cargo/env` first.
-
-The source checkout, compiled extension, virtual environment, and generated
-caches are deliberately excluded from this repository. The setup script
-does not run the benchmark or native tests.
+The setup script checks out the revision pinned in
+[`native/cyclosynth-base.txt`](native/cyclosynth-base.txt), applies the even-T
+patch, builds into the active virtual environment, and checks the installed
+API. It does not run the benchmark. An unpatched upstream installation does
+not provide the required `even_t=True` option. If needed, load the Rust shell
+environment with `source "$HOME/.cargo/env"` before setup.
 
 ## Run
 
-Inspect the optimized configuration without synthesis or grading:
-
-```bash
-python gold_local.py --mux-method phase11 --fold-common --eps 1e-9 --sizes 5 --dry-run
-```
-
-Run the smoke test first, including real grader checks at sizes 2 and 3:
+Start with the small-size smoke test:
 
 ```bash
 python smoke_test.py --mux-method phase11 --fold-common --eps 1e-9
 ```
 
-Then run one five-qubit sample:
+Run a single five-qubit target:
 
 ```bash
 python -u gold_local.py --mux-method phase11 --fold-common --eps 1e-9 --sizes 5 --seed 2026 --samples 1 --verbose
 ```
 
-To check all public cases, across sizes 2 through 5:
+Run both public cases at sizes 2 through 5 with the recorded settings:
 
 ```bash
 python -u gold_local.py --mux-method phase11 --fold-common --eps 1e-9 --verbose
 ```
 
-The full run can take around an hour, depending on hardware and available
-checkpoints. The default `.run_cache/` preserves complete raw synthesized
-circuits before cleanup and grading. Identical targets and settings reuse
-those checkpoints; changing precision or the optimization flags selects a
-different cache entry. `--cache-only` stops on a miss rather than synthesizing.
-There is no checkpoint inside an unfinished circuit.
+`--eps` is a per-word tolerance, not a whole-circuit error bound. The optional
+`--error-budget` policy is more conservative and was not used for this result.
+The grader's final matrix comparison determines accuracy.
 
-`--eps` is a **per-word** tolerance, not a guarantee on final circuit error.
-The optional `--error-budget` allocation is conservative and can substantially
-increase cost; it was not used for the reported Gold sample. Final acceptance
-always comes from the grader's full matrix comparison and cost checks.
+Completed raw circuits are saved in `.run_cache/`. Add `--no-cache` to force
+fresh synthesis, or `--cache-only` to reject missing checkpoints. Add
+`--dry-run` to inspect planned word counts without synthesis or grading.
+No checkpoint is saved inside an unfinished circuit.
 
-At five qubits, `phase11` plans 376 source words, with up to 496 if all reduced
-factorizations fall back. The final multiplexor retains the original form to
-avoid extra arbitrary rotations in the final diagonal. Common-word folding
-also works at the smaller sizes. No Gold percentage is guaranteed for new
-targets.
+This implementation requires a compiled dependency and runs outside the
+platform's Python submission block. It has not demonstrated compliance with
+the platform's 300-second limit.
 
-## Files and focused checks
+## Validation and source layout
 
-- `gold_local.py`: canonical local synthesis runner.
-- `phase_factorization.py`: bounded 11-mask continuation solver and explicit failures.
-- `gate_cleanup.py`: exact gate cleanup with scalar-phase tracking.
-- `circuit_cache.py`: validated JSON checkpoints.
-- `challenge.py`: included local grader/template; its PennyLane decomposition
-  call uses the installed `qp.transforms.decompose` namespace. The optimized
-  circuit is supplied by the runner; it is not inserted into `challenge.py`.
-- `smoke_test.py`: backend conventions, algebra, factorization, and small-size grading.
-- `phase_factor_probe.py`: standalone NumPy rank/continuation research checks.
-- `patch_parity.py`: read-only source and installed native-API checks.
-- `gold_local_fix.py`: compatibility alias for the canonical runner.
-
-The following focused checks do not perform lattice synthesis:
+Focused checks that exclude native lattice synthesis:
 
 ```bash
 python -B -m unittest -v test_phase11 test_precision_budget test_gate_cleanup test_even_word.RunnerWiringRegression
 ```
 
-They passed 29 tests locally. Native/backend regressions and Rust checks are
-separate, potentially slower commands:
+Separate native/backend checks:
 
 ```bash
 python -B -m unittest -v test_even_word
@@ -143,19 +122,25 @@ cargo test --release --lib
 cargo test --release --lib -- --ignored deep_eps_canary
 ```
 
-The native checks above are provided for reproduction; they were not rerun
-as part of packaging this repository.
+- `gold_local.py`: compiler and local grader runner.
+- `phase_factorization.py`: bounded 11-mask solver.
+- `gate_cleanup.py`: exact gate reduction with scalar-phase tracking.
+- `circuit_cache.py`: validated JSON checkpoints.
+- `challenge.py`: challenge template and grader. Its decomposition call uses
+  `qp.transforms.decompose` for PennyLane 0.42.3 compatibility; scoring and
+  accuracy thresholds are unchanged. The runner supplies the optimized circuit.
+- `smoke_test.py` and `test_*.py`: integration and component checks.
+- `native/` and `scripts/`: pinned native patch, setup, and API verification.
 
-## Attribution
+## References and attribution
 
-The controlled-gate construction builds on Yamazaki, Akibue, and Sano,
-[Multi-qubit controlled gate synthesis without T-count overhead in the small-error limit](https://arxiv.org/abs/2603.14202v3).
-The original two-author version has the title
-[Multi-qubit controlled gate with optimal T-count](https://arxiv.org/abs/2603.14202v1).
-The reduced phase-gauged numerical factorization here is an experimental
-implementation choice, not a claim of universal 11-mask solvability.
+- Yamazaki, Akibue, and Sano:
+  [Multi-qubit controlled gate synthesis without T-count overhead in the small-error limit](https://arxiv.org/abs/2603.14202v3).
+- Morisaki, Sano, and Akibue:
+  [Optimal ancilla-free Clifford+T synthesis for general single-qubit unitaries](https://arxiv.org/abs/2510.05816).
+- Shende, Bullock, and Markov:
+  [Synthesis of Quantum Logic Circuits](https://arxiv.org/abs/quant-ph/0406176v5).
 
-The native dependency is maintained upstream at
-[mtweiden/cyclosynth](https://github.com/mtweiden/cyclosynth). Its source license
-is retained in `third_party/cyclosynth-LICENSE`; the tracked patch contains
-the local even-T modifications against the pinned upstream revision.
+The native dependency is maintained at
+[mtweiden/cyclosynth](https://github.com/mtweiden/cyclosynth). Its license is
+retained in [`third_party/cyclosynth-LICENSE`](third_party/cyclosynth-LICENSE).

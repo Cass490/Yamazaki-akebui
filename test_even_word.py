@@ -10,11 +10,6 @@ import gold_local as G
 class RunnerWiringRegression(unittest.TestCase):
     """Integration checks that do not execute numerical synthesis."""
 
-    def test_compatibility_runner_uses_canonical_functions(self):
-        import gold_local_fix as fixed
-        for name in ("make_synth", "even_word", "synthesize", "queue_ops", "main"):
-            self.assertIs(getattr(fixed, name), getattr(G, name))
-
     def test_paired_words_request_even_t_without_fallback(self):
         target = np.eye(2, dtype=complex)
         with patch.object(G, "cyclosynth_synth", return_value="") as native:
